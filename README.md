@@ -12,7 +12,7 @@ GoDeck 是一个用 Go 语言编写的原生私有远程工作台：同一个客
 ## 1. 架构与运行模式
 
 - **默认/正式原生客户端（核心推荐）**：根目录（`main.go`）与 `./cmd/godeck` 均统一直接调用原生图形界面（Gio）。Windows 原生产物为 `GoDeck.exe`，Linux 原生产物为 `godeck`。支持 Linux KDE Plasma Wayland（Mesa OpenGL/EGL + PipeWire + FFmpeg VA-API）以及 Windows 10/11（D3D11 + Win32/Media Foundation）。包含原生多标签界面、指纹直接信令与中心 Hub 信令、双向 H.264 流、原生键盘鼠标捕获，以及独立的可靠有序文件传输通道。
-- **中心信令服务器（Hub）**：代码位于 `./cmd/godeck-hub`，Linux 产物为 `godeck-hub`。负责单主人账号、设备心跳管理与 WebRTC 握手信令（不转发桌面画面与文件内容）。详见 [docs/HUB.md](docs/HUB.md)。
+- **中心信令服务器（Hub）**：代码位于 `./cmd/godeck-hub`，Linux 产物为 `godeck-hub`。负责单主人账号、设备心跳管理与 WebRTC 握手信令（不转发桌面画面与文件内容）。
 - **Web 兼容模式（显式隔离）**：代码位于 `./cmd/godeck-compat`，产物为 `godeck-compat` 或 `godeck-compat.exe`。基于浏览器和 HTTP 截图轮询的旧版兼容服务，仅在显式构建并启动 compat 命令时运行，用于无图形环境调试，**正式客户端不加载亦不嵌入 HTML**。
 
 ---
@@ -68,7 +68,7 @@ CGO_ENABLED=1 go build -tags novulkan -o godeck ./cmd/godeck
 3. **正式构建防误触保护**：
    - `native/media` 模块配置了明确的构建约束：未启用 CGO 且未显式指定 `-tags godeck_preview` 时，`go build` 会直接中断并抛出明确错误提示，杜绝误构建出“假冒正式版”的无媒体空壳程序。
 
-详细的环境变量配置、工具链说明及编译命令请参阅专门文档：[docs/WINDOWS.md](docs/WINDOWS.md)。
+完整构建流程见脚本 `.tools/build_windows_dist.sh`。
 
 ---
 
@@ -150,7 +150,7 @@ go build -o godeck-hub ./cmd/godeck-hub
 ./godeck-hub -data ./hub-data -listen 127.0.0.1:8787
 ```
 
-首次启动会在控制台输出一次性 Setup 码（15分钟有效）。客户端在 Hub 登录卡片中输入该 Setup 码即可创建主人账号。更多关于证书配置、STUN/TURN 设置及快照备份的说明，请参阅 [docs/HUB.md](docs/HUB.md)。
+首次启动会在控制台输出一次性 Setup 码（15分钟有效）。客户端在 Hub 登录卡片中输入该 Setup 码即可创建主人账号。STUN/TURN 与服务部署示例配置见 `deploy/` 目录（其中服务器地址为 `YOUR_SERVER_IP` 占位符，部署前请替换）。
 
 ---
 
