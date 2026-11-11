@@ -143,6 +143,9 @@ type wlSeat struct {
 	offers map[*C.struct_wl_data_offer][]string
 	// clipboard is the wl_data_offer for the clipboard.
 	clipboard *C.struct_wl_data_offer
+	// dragOffer is the accepted drag-and-drop offer (GoDeck file drop patch).
+	dragOffer  *C.struct_wl_data_offer
+	dragWindow *window
 	// mimeType is the chosen mime type of clipboard.
 	mimeType string
 	// source represents the clipboard content of the most recent
@@ -482,7 +485,7 @@ func gio_onSeatCapabilities(data unsafe.Pointer, seat *C.struct_wl_seat, caps C.
 // content.
 func (s *wlSeat) flushOffers() {
 	for o := range s.offers {
-		if o == s.clipboard {
+		if o == s.clipboard || o == s.dragOffer {
 			continue
 		}
 		// We're only interested in clipboard offers.
@@ -510,6 +513,7 @@ func (s *wlSeat) destroy() {
 	if s.keyboard != nil {
 		C.wl_keyboard_release(s.keyboard)
 	}
+	s.dragRelease()
 	s.clipboard = nil
 	s.flushOffers()
 	if s.dataDev != nil {
@@ -767,11 +771,18 @@ func gio_onDataDeviceOffer(data unsafe.Pointer, dataDev *C.struct_wl_data_device
 func gio_onDataDeviceEnter(data unsafe.Pointer, dataDev *C.struct_wl_data_device, serial C.uint32_t, surf *C.struct_wl_surface, x, y C.wl_fixed_t, id *C.struct_wl_data_offer) {
 	s := callbackLoad(data).(*wlSeat)
 	s.serial = serial
+	var w *window
+	if surf != nil {
+		w, _ = callbackLoad(unsafe.Pointer(surf)).(*window)
+	}
+	s.dragEnter(serial, w, id)
 	s.flushOffers()
 }
 
 //export gio_onDataDeviceLeave
 func gio_onDataDeviceLeave(data unsafe.Pointer, dataDev *C.struct_wl_data_device) {
+	s := callbackLoad(data).(*wlSeat)
+	s.dragRelease()
 }
 
 //export gio_onDataDeviceMotion
@@ -780,6 +791,8 @@ func gio_onDataDeviceMotion(data unsafe.Pointer, dataDev *C.struct_wl_data_devic
 
 //export gio_onDataDeviceDrop
 func gio_onDataDeviceDrop(data unsafe.Pointer, dataDev *C.struct_wl_data_device) {
+	s := callbackLoad(data).(*wlSeat)
+	s.dragDrop()
 }
 
 //export gio_onDataDeviceSelection

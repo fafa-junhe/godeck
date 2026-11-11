@@ -186,6 +186,7 @@ func (w *window) init() error {
 		return err
 	}
 	w.hwnd = hwnd
+	enableFileDrop(uintptr(hwnd))
 	return nil
 }
 
@@ -233,6 +234,9 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 	w := win.(*window)
 
 	switch msg {
+	case wmDropFiles:
+		w.w.dropFiles(dropPaths(wParam))
+		return 0
 	case windows.WM_UNICHAR:
 		if wParam == windows.UNICODE_NOCHAR {
 			// Tell the system that we accept WM_UNICHAR messages.

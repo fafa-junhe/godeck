@@ -179,16 +179,20 @@ func Run() error {
 	}
 
 	controller.OnFileEvent = func(e transfer.Event) {
-		var needRefresh bool
+		var needRefresh, checkDrained bool
 		m.mu.Lock()
 		switch e.Type {
 		case "ready":
 			m.transferErr = ""
 			needRefresh = true
 		case "list":
-			m.fileList = e.Files
 			if e.Error != "" {
 				m.transferErr = e.Error
+			} else {
+				files := append([]transfer.File(nil), e.Files...)
+				sortFiles(files)
+				m.fileList = files
+				m.remotePath = e.Path
 			}
 		case "progress":
 			m.transferring = true
@@ -203,17 +207,30 @@ func Run() error {
 		case "complete":
 			m.transferring = false
 			m.transferProg = "传输完成：" + e.Name
-			needRefresh = true
+			checkDrained = true
 		case "error":
 			m.transferring = false
 			m.transferErr = e.Error
 			m.transferProg = ""
 		}
 		m.mu.Unlock()
+		// Refresh once the viewer queue drains, not after every file.
+		if checkDrained {
+			if fm := controller.FileManager(); fm != nil {
+				active, _, _ := jobCounts(fm.Jobs())
+				needRefresh = active == 0
+			}
+		}
 		if needRefresh {
 			if fm := controller.FileManager(); fm != nil {
+				m.mu.Lock()
+				dir := m.remotePath
+				if e.Type == "ready" {
+					dir = "" // new connection starts at the share root
+				}
+				m.mu.Unlock()
 				go func() {
-					_ = fm.List()
+					_ = fm.List(dir)
 				}()
 			}
 		}
@@ -235,6 +252,7 @@ func Run() error {
 	}
 
 	u := NewUI(m, theme, cfg, cfgPath)
+	w.SetFileDropHandler(m.handleFileDrop)
 	defer u.stopInput()
 
 	// 启动时自动登录中心账号 (若已在配置中开启)
@@ -298,6 +316,7 @@ func Run() error {
 				u.activeTab = m.pendingTab
 				m.pendingTab = -1
 			}
+			m.filesTabActive = false // set again by layoutFilesView
 			m.mu.Unlock()
 
 			layout.Stack{Alignment: layout.S}.Layout(gtx,

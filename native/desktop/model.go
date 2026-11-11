@@ -66,6 +66,11 @@ type Model struct {
 	transferProg  string
 	transferErr   string
 
+	// File manager: remote directory shown, and whether the files tab was
+	// rendered in the last frame (file drops are only accepted there).
+	remotePath     string
+	filesTabActive bool
+
 	// Clipboard sync state of the outgoing session
 	clipState string // "", "pending", "active", "denied"
 	clipNote  string
@@ -163,6 +168,7 @@ type UI struct {
 	btnFileCancel   widget.Clickable
 	btnFileRetry    widget.Clickable
 	fileDownloadBtns []widget.Clickable
+	files            fileUI
 
 	// Settings View widgets
 	preset720pBtn          widget.Clickable

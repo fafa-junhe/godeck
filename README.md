@@ -29,7 +29,7 @@ GoDeck 是一个用 Go 语言编写的原生私有远程工作台：同一个客
 sudo pacman -S --needed go gcc pkgconf wayland libx11 libxkbcommon libxcursor \
     mesa gstreamer gst-plugins-base gst-plugins-bad gst-plugins-ugly gst-libav \
     gst-plugin-va gst-plugin-pipewire pipewire libva libva-intel-driver ffmpeg \
-    xdg-desktop-portal-kde
+    xdg-desktop-portal-kde wl-clipboard
 ```
 
 > **注意**：
@@ -106,9 +106,13 @@ CGO_ENABLED=1 go build -tags novulkan -o godeck ./cmd/godeck
 - **远端 Esc**：工具栏提供独立的“发送远端 Esc”按钮，专用于触发远端系统的 Esc 事件。
 - 窗口失焦、切换标签页、画面暂停或主动断开时，输入泵（`InputPump`）会自动发送按键释放指令并清空输入队列；若突发网络中断导致释放报文无法抵达，被控端会在会话结束时尽力释放本地按键，保留故障边界，防止将按键残留泄漏至后续连接。
 
-### D. 原生文件传输（`godeck-files`）
+### D. 原生文件管理（`godeck-files`）
 
-- 会话顶部提供【桌面画面】与【文件传输】切换标签，切换视图不会中断后台的文件传输任务。
+- 顶部导航【文件】页为独立的文件管理器，切换页面不会中断后台传输队列：
+  - 浏览对端共享目录树（面包屑导航、上一级、筛选），文件夹优先排序。
+  - 下载单个文件，或“下载文件夹”递归下载整个目录（保留目录结构，空目录同样创建），保存到本机共享/下载目录，可一键“打开本机下载目录”。
+  - “上传文件…”/“上传文件夹…”使用原生选择器；也可**把文件或文件夹从资源管理器 / Dolphin 直接拖进窗口**，上传到对端当前目录（Windows `WM_DROPFILES`；Linux Wayland `text/uri-list` 拖放；X11 暂不支持拖放）。
+  - 传输队列按顺序逐个执行，显示每项进度、状态与错误，支持取消当前、全部取消、重试失败、清除已结束。
 - **权限独立**：必须在来访时显式授权文件访问权限；未授权时文件功能完全禁用，只读桌面亦可单独授权文件传输。
 - **传输机制**：
   - 基于独立的 WebRTC DataChannel，单文件上限 100 MiB。
@@ -118,8 +122,16 @@ CGO_ENABLED=1 go build -tags novulkan -o godeck ./cmd/godeck
   - Linux 下优先调用 KDE FileChooser 桌面门户（D-Bus），并在缺少门户时兼容 `kdialog` / `zenity`。
   - Windows 下调用 Win32 原生 `GetOpenFileNameW` 与 `GetSaveFileNameW`。
 - **原子无覆盖提交**：
-  - 上传/下载均在共享目录内的私有隐藏临时目录接收完整文件，校验无误后通过同文件系统的硬链接（`os.Link`）提交至最终目标路径。
-  - 若目标已存在同名文件或文件系统不支持硬链接，立即安全报错，严禁静默覆盖已有文件。
+  - 上传/下载均在目标目录内的私有隐藏临时目录接收完整文件，校验无误后通过同文件系统的硬链接（`os.Link`）提交至最终目标路径。
+  - 若目标已存在同名文件，自动另存为 `名称 (1).扩展名` 等新名称并在队列中提示，**绝不覆盖已有文件**；文件系统不支持硬链接时先以 `O_EXCL` 原子占位再移动。
+  - 路径逐级校验：每一级名称都须通过文件名规则，逐级拒绝符号链接、Junction 与其他重解析点，深度上限 32 级；单次文件夹操作上限 10000 个条目。
+
+### E. 剪贴板同步（`godeck-clipboard`）
+
+- 被控端审批卡片中的“允许双向剪贴板同步（文本）”为**独立权限，默认不勾选**；未授权时被控端直接关闭该通道，控制端工具栏显示“剪贴板：对端未授权”。
+- 授权后双方复制的 UTF-8 文本会自动同步到对端（单条上限 1 MiB）；连接建立时不会推送已有剪贴板内容，只同步之后的新复制。
+- 控制端会话工具栏可随时暂停/恢复同步。
+- Windows 使用 Win32 剪贴板 API；Linux Wayland 依赖 `wl-clipboard`（`wl-paste --watch` / `wl-copy`，需合成器支持 data-control 协议，KDE Plasma 支持），X11 回退 `xclip`。
 
 ---
 
@@ -147,7 +159,7 @@ go build -o godeck-hub ./cmd/godeck-hub
 以下特性在本轮范围中明确**尚未提供**：
 - macOS 原生客户端（仅保留 Web 模式）。
 - 远程音频传输。
-- 剪贴板自动同步。
+- 剪贴板图片/文件同步（目前仅文本）。
 - 自动检查与在线更新。
 - 端到端完全零拷贝回读。
 - 多组织与多用户团队权限。

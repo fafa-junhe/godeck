@@ -30,7 +30,7 @@ func randomToken() string {
 
 // ChooseOpenFile opens a native file selection dialog (KDE FileChooser portal preferred, falling back to kdialog/zenity).
 func ChooseOpenFile(title string) (string, error) {
-	path, err := portalFileChooser("OpenFile", title, false, "")
+	path, err := portalFileChooser("OpenFile", title, false, "", false)
 	if err == nil && path != "" {
 		return path, nil
 	}
@@ -55,7 +55,7 @@ func ChooseOpenFile(title string) (string, error) {
 
 // ChooseSaveFile opens a native save destination dialog (KDE FileChooser portal preferred).
 func ChooseSaveFile(title, defaultName string) (string, error) {
-	path, err := portalFileChooser("SaveFile", title, true, defaultName)
+	path, err := portalFileChooser("SaveFile", title, true, defaultName, false)
 	if err == nil && path != "" {
 		return path, nil
 	}
@@ -77,7 +77,7 @@ func ChooseSaveFile(title, defaultName string) (string, error) {
 	return "", errors.New("已取消保存路径选择")
 }
 
-func portalFileChooser(method, title string, save bool, currentName string) (string, error) {
+func portalFileChooser(method, title string, save bool, currentName string, directory bool) (string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return "", err
@@ -91,6 +91,9 @@ func portalFileChooser(method, title string, save bool, currentName string) (str
 	options := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(handleToken),
 		"multiple":     dbus.MakeVariant(false),
+	}
+	if directory {
+		options["directory"] = dbus.MakeVariant(true)
 	}
 	if save && currentName != "" {
 		options["current_name"] = dbus.MakeVariant(currentName)
@@ -151,4 +154,26 @@ func portalFileChooser(method, title string, save bool, currentName string) (str
 			return u.Path, nil
 		}
 	}
+}
+
+// ChooseFolder opens a native folder selection dialog (portal first, then kdialog/zenity).
+func ChooseFolder(title string) (string, error) {
+	path, err := portalFileChooser("OpenFile", title, false, "", true)
+	if err == nil && path != "" {
+		return path, nil
+	}
+	if out, e := exec.Command("kdialog", "--title", title, "--getexistingdirectory").Output(); e == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			return s, nil
+		}
+	}
+	if out, e := exec.Command("zenity", "--file-selection", "--directory", "--title="+title).Output(); e == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			return s, nil
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return "", errors.New("已取消选择文件夹")
 }

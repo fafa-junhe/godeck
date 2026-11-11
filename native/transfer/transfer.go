@@ -1,4 +1,6 @@
-// Package transfer implements bounded, explicitly authorized, single-file transfers.
+// Package transfer implements bounded, explicitly authorized file transfers
+// inside a single shared directory tree, with a sequential job queue on the
+// viewer side.
 package transfer
 
 import (
@@ -10,11 +12,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -23,7 +23,9 @@ const MaxFileBytes int64 = 100 << 20
 const chunkBytes = 16 << 10
 const windowBytes int64 = 512 << 10 // sliding window in flight
 const maxBuffered = 64 << 10       // DataChannel buffer limit
-const maxFiles = 512
+const maxListEntries = 2000
+const maxTreeEntries = 10000
+const maxQueuedJobs = 20000
 const timeout = 30 * time.Second
 
 type Role int
@@ -33,16 +35,24 @@ const (
 	Host
 )
 
+// File is one entry of a remote directory listing.
 type File struct {
 	Name     string    `json:"name"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
+	Dir      bool      `json:"dir,omitempty"`
+}
+
+type treeFile struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
 }
 
 type Event struct {
-	Type  string // "ready", "list", "progress", "complete", "error"
+	Type  string // "ready", "list", "progress", "complete", "error", "jobs"
 	ID    string
 	Name  string
+	Path  string // directory of a "list" event
 	Error string
 	Bytes int64
 	Total int64
@@ -50,24 +60,62 @@ type Event struct {
 }
 
 type wire struct {
-	Type   string `json:"type"`
-	ID     string `json:"id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Size   int64  `json:"size,omitempty"`
-	Offset int64  `json:"offset,omitempty"`
-	Error  string `json:"error,omitempty"`
-	Files  []File `json:"files,omitempty"`
+	Type   string     `json:"type"`
+	ID     string     `json:"id,omitempty"`
+	Name   string     `json:"name,omitempty"`
+	Path   string     `json:"path,omitempty"`
+	Size   int64      `json:"size,omitempty"`
+	Offset int64      `json:"offset,omitempty"`
+	Error  string     `json:"error,omitempty"`
+	Files  []File     `json:"files,omitempty"`
+	Tree   []treeFile `json:"tree,omitempty"`
+	Dirs   []string   `json:"dirs,omitempty"`
+}
+
+// JobKind is the operation of a queued job.
+type JobKind string
+
+const (
+	JobUpload   JobKind = "upload"
+	JobDownload JobKind = "download"
+	JobMkdir    JobKind = "mkdir"
+)
+
+// JobState is the lifecycle state of a queued job.
+type JobState string
+
+const (
+	JobQueued   JobState = "queued"
+	JobRunning  JobState = "running"
+	JobDone     JobState = "done"
+	JobFailed   JobState = "failed"
+	JobCanceled JobState = "canceled"
+)
+
+// Job is one queued transfer, as seen by the viewer UI.
+type Job struct {
+	ID     int
+	Kind   JobKind
+	Local  string // upload: absolute local source; download: path relative to the download dir
+	Remote string // wire path in the remote share
+	Size   int64
+	Done   int64
+	State  JobState
+	Error  string
+	Saved  string // final name when renamed to avoid overwriting
 }
 
 type task struct {
 	mu      sync.Mutex
 	id      string
-	name    string
+	name    string // target file name
+	dir     string // target directory (receiver) for temp + commit
 	total   int64
 	offset  int64
 	file    *os.File
 	temp    string
 	sender  bool
+	job     *Job
 	signals chan wire
 	stop    chan struct{}
 	once    sync.Once
@@ -90,8 +138,14 @@ func (t *task) close() {
 	})
 }
 
+type pendingTree struct {
+	remote string // requested remote directory
+	local  string // local base path relative to the download dir
+}
+
 type Manager struct {
 	mu          sync.Mutex
+	pumpMu      sync.Mutex // serializes job selection + start
 	dc          *webrtc.DataChannel
 	role        Role
 	root        string
@@ -100,6 +154,10 @@ type Manager struct {
 	current     *task
 	closed      bool
 	pendingList string
+	listPath    string
+	trees       map[string]pendingTree
+	jobs        []*Job
+	nextJob     int
 }
 
 func New(dc *webrtc.DataChannel, role Role, root string, allowed func() bool, emit func(Event)) *Manager {
@@ -109,6 +167,7 @@ func New(dc *webrtc.DataChannel, role Role, root string, allowed func() bool, em
 		root:    root,
 		allowed: allowed,
 		emit:    emit,
+		trees:   make(map[string]pendingTree),
 	}
 	dc.OnMessage(m.message)
 	dc.OnClose(func() { _ = m.Close() })
@@ -156,46 +215,51 @@ func validID(v string) bool {
 	return e == nil
 }
 
-func validName(name string) bool {
-	if name == "" || len(name) > 240 || name == "." || name == ".." || filepath.Base(name) != name ||
-		strings.ContainsAny(name, `/\<>:"|?*`+"\x00") || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
-		return false
+func errOf(s string) error {
+	if s == "" {
+		return nil
 	}
-	for _, r := range name {
-		if unicode.IsControl(r) {
-			return false
-		}
-	}
-	stem := strings.ToUpper(strings.TrimRight(strings.SplitN(name, ".", 2)[0], " "))
-	switch stem {
-	case "CON", "PRN", "AUX", "NUL",
-		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-		"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³":
-		return false
-	}
-	return true
+	return errors.New(s)
 }
 
-func (m *Manager) List() error {
+// wirePath accepts the new "path" field and falls back to the legacy "name".
+func wirePath(x wire) string {
+	if x.Path != "" {
+		return x.Path
+	}
+	return x.Name
+}
+
+// ---------------------------------------------------------------------------
+// Viewer API
+
+// List requests the entries of a remote directory ("" is the share root).
+// A newer request supersedes an older pending one.
+func (m *Manager) List(dir string) error {
 	if m.role != Viewer {
 		return errors.New("仅查看方可请求列表")
+	}
+	if _, ok := splitPath(dir); !ok {
+		return errors.New("目录路径无效")
 	}
 	req := id()
 	if req == "" {
 		return errors.New("无法创建请求")
 	}
 	m.mu.Lock()
-	if m.closed || m.pendingList != "" {
+	if m.closed {
 		m.mu.Unlock()
-		return errors.New("列表请求进行中")
+		return errors.New("文件通道已关闭")
 	}
 	m.pendingList = req
+	m.listPath = dir
 	m.mu.Unlock()
 
-	if e := m.send(wire{Type: "list", ID: req}); e != nil {
+	if e := m.send(wire{Type: "list", ID: req, Path: dir}); e != nil {
 		m.mu.Lock()
-		m.pendingList = ""
+		if m.pendingList == req {
+			m.pendingList = ""
+		}
 		m.mu.Unlock()
 		return e
 	}
@@ -216,6 +280,306 @@ func (m *Manager) List() error {
 	return nil
 }
 
+// Upload queues a single local file or a whole local folder into the remote share root.
+func (m *Manager) Upload(path string) error { return m.EnqueueUpload(path, "") }
+
+// Download queues a remote file from the share root.
+func (m *Manager) Download(name string) error { return m.EnqueueDownload(name, false) }
+
+func (m *Manager) addJobs(jobs []*Job) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("文件通道已关闭")
+	}
+	queued := 0
+	for _, j := range m.jobs {
+		if j.State == JobQueued || j.State == JobRunning {
+			queued++
+		}
+	}
+	if queued+len(jobs) > maxQueuedJobs {
+		m.mu.Unlock()
+		return errors.New("排队任务过多，请等待当前任务完成")
+	}
+	for _, j := range jobs {
+		m.nextJob++
+		j.ID = m.nextJob
+		if j.State == "" {
+			j.State = JobQueued
+		}
+		m.jobs = append(m.jobs, j)
+	}
+	m.mu.Unlock()
+	m.event(Event{Type: "jobs"})
+	go m.pump()
+	return nil
+}
+
+// EnqueueUpload queues a local file, or every regular file under a local
+// folder (preserving structure), for upload into remoteDir. Symlinks and
+// special files are skipped; names the peer could not store are rejected.
+func (m *Manager) EnqueueUpload(local, remoteDir string) error {
+	if m.role != Viewer {
+		return errors.New("仅查看方可上传")
+	}
+	if _, ok := splitPath(remoteDir); !ok {
+		return errors.New("目标目录无效")
+	}
+	info, err := os.Lstat(local)
+	if err != nil {
+		return err
+	}
+	base := filepath.Base(local)
+	if !validName(base) {
+		return errors.New("名称不受支持：" + base)
+	}
+	if info.Mode().IsRegular() {
+		j := &Job{Kind: JobUpload, Local: local, Remote: JoinPath(remoteDir, base), Size: info.Size()}
+		if info.Size() > MaxFileBytes {
+			j.State, j.Error = JobFailed, "超过 100 MiB 上限"
+		}
+		return m.addJobs([]*Job{j})
+	}
+	if !isPlainDir(info) {
+		return errors.New("仅支持普通文件或文件夹：" + base)
+	}
+
+	var jobs []*Job
+	skipped := 0
+	err = filepath.WalkDir(local, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			skipped++
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, e := filepath.Rel(filepath.Dir(local), p)
+		if e != nil {
+			return e
+		}
+		remote := JoinPath(remoteDir, filepath.ToSlash(rel))
+		if _, ok := splitPath(remote); !ok {
+			skipped++
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		fi, e := d.Info()
+		if e != nil {
+			skipped++
+			return nil
+		}
+		switch {
+		case isPlainDir(fi):
+			jobs = append(jobs, &Job{Kind: JobMkdir, Local: p, Remote: remote})
+		case fi.Mode().IsRegular():
+			j := &Job{Kind: JobUpload, Local: p, Remote: remote, Size: fi.Size()}
+			if fi.Size() > MaxFileBytes {
+				j.State, j.Error = JobFailed, "超过 100 MiB 上限"
+			}
+			jobs = append(jobs, j)
+		default:
+			skipped++ // symlinks, devices, junctions
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+		}
+		if len(jobs) > maxTreeEntries {
+			return errors.New("文件夹内条目超过 10000 个")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err = m.addJobs(jobs); err != nil {
+		return err
+	}
+	if skipped > 0 {
+		m.event(Event{Type: "error", Error: "已跳过 " + itoa(skipped) + " 个链接、特殊文件或名称不受支持的条目"})
+	}
+	return nil
+}
+
+// EnqueueDownload queues a remote file, or (dir=true) every file under a
+// remote folder, for download into the local download directory.
+func (m *Manager) EnqueueDownload(remote string, dir bool) error {
+	if m.role != Viewer {
+		return errors.New("仅查看方可下载")
+	}
+	parts, ok := splitPath(remote)
+	if !ok || len(parts) == 0 {
+		return errors.New("文件路径无效")
+	}
+	if !dir {
+		return m.addJobs([]*Job{{Kind: JobDownload, Remote: remote, Local: BaseName(remote)}})
+	}
+	req := id()
+	if req == "" {
+		return errors.New("无法创建请求")
+	}
+	m.mu.Lock()
+	m.trees[req] = pendingTree{remote: remote, local: BaseName(remote)}
+	m.mu.Unlock()
+	if e := m.send(wire{Type: "tree", ID: req, Path: remote}); e != nil {
+		m.mu.Lock()
+		delete(m.trees, req)
+		m.mu.Unlock()
+		return e
+	}
+	go func() {
+		time.Sleep(timeout)
+		m.mu.Lock()
+		_, waiting := m.trees[req]
+		delete(m.trees, req)
+		m.mu.Unlock()
+		if waiting {
+			m.event(Event{Type: "error", Error: "读取远端文件夹超时"})
+		}
+	}()
+	return nil
+}
+
+// Jobs returns a snapshot of the queue, oldest first.
+func (m *Manager) Jobs() []Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Job, len(m.jobs))
+	for i, j := range m.jobs {
+		out[i] = *j
+	}
+	return out
+}
+
+// Cancel aborts the running job; queued jobs continue.
+func (m *Manager) Cancel() error {
+	m.mu.Lock()
+	t := m.current
+	m.mu.Unlock()
+	if t != nil {
+		_ = m.send(wire{Type: "cancel", ID: t.id})
+		m.finishState(t, errors.New("已取消"), JobCanceled)
+	}
+	return nil
+}
+
+// CancelAll drops every queued job and aborts the running one.
+func (m *Manager) CancelAll() {
+	m.mu.Lock()
+	for _, j := range m.jobs {
+		if j.State == JobQueued {
+			j.State = JobCanceled
+			j.Error = "已取消"
+		}
+	}
+	m.mu.Unlock()
+	_ = m.Cancel()
+	m.event(Event{Type: "jobs"})
+}
+
+// RetryFailed re-queues failed and canceled jobs, except oversize files.
+func (m *Manager) RetryFailed() {
+	m.mu.Lock()
+	for _, j := range m.jobs {
+		if (j.State == JobFailed || j.State == JobCanceled) && j.Size <= MaxFileBytes {
+			j.State, j.Error, j.Done, j.Saved = JobQueued, "", 0, ""
+		}
+	}
+	m.mu.Unlock()
+	m.event(Event{Type: "jobs"})
+	go m.pump()
+}
+
+// ClearFinished removes completed, failed and canceled jobs from the list.
+func (m *Manager) ClearFinished() {
+	m.mu.Lock()
+	kept := m.jobs[:0]
+	for _, j := range m.jobs {
+		if j.State == JobQueued || j.State == JobRunning {
+			kept = append(kept, j)
+		}
+	}
+	for i := len(kept); i < len(m.jobs); i++ {
+		m.jobs[i] = nil
+	}
+	m.jobs = kept
+	m.mu.Unlock()
+	m.event(Event{Type: "jobs"})
+}
+
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	t := m.current
+	m.current = nil
+	m.pendingList = ""
+	for _, j := range m.jobs {
+		if j.State == JobQueued || j.State == JobRunning {
+			j.State, j.Error = JobCanceled, "连接已断开"
+		}
+	}
+	m.mu.Unlock()
+	if t != nil {
+		t.close()
+	}
+	m.event(Event{Type: "jobs"})
+	return nil
+}
+
+// pump starts the next queued job when the channel is idle.
+func (m *Manager) pump() {
+	m.pumpMu.Lock()
+	defer m.pumpMu.Unlock()
+	for {
+		m.mu.Lock()
+		if m.closed || m.current != nil || m.role != Viewer {
+			m.mu.Unlock()
+			return
+		}
+		var j *Job
+		for _, x := range m.jobs {
+			if x.State == JobQueued {
+				j = x
+				break
+			}
+		}
+		if j == nil {
+			m.mu.Unlock()
+			return
+		}
+		j.State = JobRunning
+		j.Done = 0
+		m.mu.Unlock()
+		m.event(Event{Type: "jobs"})
+
+		var err error
+		switch j.Kind {
+		case JobUpload:
+			err = m.startUpload(j)
+		case JobDownload:
+			err = m.startDownload(j)
+		case JobMkdir:
+			err = m.startMkdir(j)
+		}
+		if err == nil {
+			return // finish() will pump again
+		}
+		m.mu.Lock()
+		if j.State == JobRunning {
+			j.State, j.Error = JobFailed, err.Error()
+		}
+		m.mu.Unlock()
+		m.event(Event{Type: "jobs"})
+	}
+}
+
 func (m *Manager) start(t *task) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -230,32 +594,30 @@ func (m *Manager) start(t *task) error {
 	return nil
 }
 
-func (m *Manager) Upload(path string) error {
-	if m.role != Viewer {
-		return errors.New("仅查看方可上传")
+func newTask(taskID, name string, job *Job) *task {
+	return &task{
+		id:      taskID,
+		name:    name,
+		job:     job,
+		signals: make(chan wire, 64),
+		stop:    make(chan struct{}),
 	}
-	name := filepath.Base(path)
-	if !validName(name) {
-		return errors.New("文件名不受支持")
-	}
-	f, e := openRegular(path)
+}
+
+func (m *Manager) startUpload(j *Job) error {
+	f, e := openRegular(j.Local)
 	if e != nil {
-		return e
+		return errors.New("无法读取本地文件")
 	}
 	info, e := f.Stat()
 	if e != nil || info.Size() > MaxFileBytes {
 		f.Close()
 		return errors.New("文件不可用或超过 100 MiB")
 	}
-	t := &task{
-		id:      id(),
-		name:    name,
-		total:   info.Size(),
-		file:    f,
-		sender:  true,
-		signals: make(chan wire, 64),
-		stop:    make(chan struct{}),
-	}
+	t := newTask(id(), BaseName(j.Remote), j)
+	t.total = info.Size()
+	t.file = f
+	t.sender = true
 	if t.id == "" {
 		t.close()
 		return errors.New("无法创建任务")
@@ -264,88 +626,107 @@ func (m *Manager) Upload(path string) error {
 		t.close()
 		return e
 	}
-	if e = m.send(wire{Type: "upload", ID: t.id, Name: name, Size: t.total}); e != nil {
+	m.mu.Lock()
+	j.Size = t.total
+	m.mu.Unlock()
+	if e = m.send(wire{Type: "upload", ID: t.id, Name: t.name, Path: j.Remote, Size: t.total}); e != nil {
 		m.finish(t, e)
-		return e
+		return nil
 	}
 	go m.sendFile(t)
 	return nil
 }
 
-func (m *Manager) Download(name string) error {
-	if m.role != Viewer || !validName(name) {
-		return errors.New("文件名无效")
+func (m *Manager) startDownload(j *Job) error {
+	localParts, ok := splitPath(j.Local)
+	if !ok || len(localParts) == 0 {
+		return errors.New("本地路径无效")
 	}
-	t := &task{
-		id:      id(),
-		name:    name,
-		signals: make(chan wire, 64),
-		stop:    make(chan struct{}),
+	dir, e := resolveDir(m.root, localParts[:len(localParts)-1], true)
+	if e != nil {
+		return e
 	}
+	t := newTask(id(), localParts[len(localParts)-1], j)
+	t.dir = dir
+	if t.id == "" {
+		return errors.New("无法创建任务")
+	}
+	if e = m.start(t); e != nil {
+		return e
+	}
+	if e = m.send(wire{Type: "download", ID: t.id, Name: BaseName(j.Remote), Path: j.Remote}); e != nil {
+		m.finish(t, e)
+		return nil
+	}
+	go m.deadline(t)
+	return nil
+}
+
+func (m *Manager) startMkdir(j *Job) error {
+	t := newTask(id(), BaseName(j.Remote), j)
 	if t.id == "" {
 		return errors.New("无法创建任务")
 	}
 	if e := m.start(t); e != nil {
 		return e
 	}
-	if e := m.send(wire{Type: "download", ID: t.id, Name: name}); e != nil {
+	if e := m.send(wire{Type: "mkdir", ID: t.id, Path: j.Remote}); e != nil {
 		m.finish(t, e)
-		return e
+		return nil
 	}
 	go m.deadline(t)
 	return nil
 }
 
-func (m *Manager) Cancel() error {
-	m.mu.Lock()
-	t := m.current
-	m.mu.Unlock()
-	if t != nil {
-		_ = m.send(wire{Type: "cancel", ID: t.id})
-		m.finish(t, errors.New("已取消"))
-	}
-	return nil
-}
-
-func (m *Manager) Close() error {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil
-	}
-	m.closed = true
-	t := m.current
-	m.current = nil
-	m.pendingList = ""
-	m.mu.Unlock()
-	if t != nil {
-		t.close()
-	}
-	return nil
-}
-
 func (m *Manager) finish(t *task, e error) {
+	state := JobDone
+	if e != nil {
+		state = JobFailed
+	}
+	m.finishState(t, e, state)
+}
+
+func (m *Manager) finishState(t *task, e error, state JobState) {
 	m.mu.Lock()
 	if m.current != t {
 		m.mu.Unlock()
 		return
 	}
 	m.current = nil
-	m.mu.Unlock()
-
 	t.mu.Lock()
 	offset, total := t.offset, t.total
 	t.mu.Unlock()
+	if j := t.job; j != nil {
+		j.State = state
+		j.Done = offset
+		if e != nil {
+			j.Error = e.Error()
+		}
+	}
+	m.mu.Unlock()
 	t.close()
 
 	event := Event{ID: t.id, Name: t.name, Bytes: offset, Total: total}
 	if e != nil {
 		event.Type = "error"
-		event.Error = e.Error()
+		event.Error = t.name + "：" + e.Error()
 	} else {
 		event.Type = "complete"
 	}
 	m.event(event)
+	if t.job != nil {
+		m.event(Event{Type: "jobs"})
+		go m.pump()
+	}
+}
+
+func (m *Manager) progress(t *task, done int64) {
+	m.mu.Lock()
+	if t.job != nil {
+		t.job.Done = done
+	}
+	m.mu.Unlock()
+	m.event(Event{Type: "progress", ID: t.id, Name: t.name, Bytes: done, Total: t.total})
 }
 
 func (m *Manager) deadline(t *task) {
@@ -358,7 +739,7 @@ func (m *Manager) deadline(t *task) {
 		case <-ticker.C:
 			if time.Since(time.Unix(0, t.last.Load())) >= timeout {
 				_ = m.send(wire{Type: "cancel", ID: t.id})
-				m.finish(t, errors.New("等待文件数据超时，结果未确认；请刷新列表"))
+				m.finish(t, errors.New("等待对端响应超时，结果未确认；请刷新列表"))
 				return
 			}
 		}
@@ -399,47 +780,46 @@ func (m *Manager) sendFile(t *task) {
 	sentOffset := int64(0)
 	ackedOffset := int64(0)
 
+	// handle applies one peer signal; it returns false when the task ended.
+	handle := func(sig wire) bool {
+		if sig.Type == "ack" && sig.Offset > ackedOffset {
+			ackedOffset = sig.Offset
+			t.mu.Lock()
+			t.offset = ackedOffset
+			t.mu.Unlock()
+			m.progress(t, ackedOffset)
+		} else if sig.Type == "result" && sig.Error != "" {
+			m.finish(t, errors.New(sig.Error))
+			return false
+		}
+		return true
+	}
+
 	for sentOffset < t.total {
 		if !m.permitted() {
 			m.finish(t, errors.New("文件权限已撤回"))
 			return
 		}
 
-		// Sliding window backpressure: wait for window if too many bytes are in-flight
+		// Sliding window backpressure: wait while too many bytes are in flight.
 		for sentOffset-ackedOffset >= windowBytes {
 			sig, err := m.signal(t)
 			if err != nil {
 				m.finish(t, err)
 				return
 			}
-			if sig.Type == "ack" {
-				if sig.Offset > ackedOffset {
-					ackedOffset = sig.Offset
-					t.mu.Lock()
-					t.offset = ackedOffset
-					t.mu.Unlock()
-					m.event(Event{Type: "progress", ID: t.id, Name: t.name, Bytes: ackedOffset, Total: t.total})
-				}
-			} else if sig.Type == "result" && sig.Error != "" {
-				m.finish(t, errors.New(sig.Error))
+			if !handle(sig) {
 				return
 			}
 		}
 
-		// WebRTC DataChannel buffer backpressure
+		// WebRTC DataChannel buffer backpressure.
 		for m.dc.BufferedAmount() > maxBuffered {
 			select {
 			case <-t.stop:
 				return
 			case sig := <-t.signals:
-				if sig.Type == "ack" && sig.Offset > ackedOffset {
-					ackedOffset = sig.Offset
-					t.mu.Lock()
-					t.offset = ackedOffset
-					t.mu.Unlock()
-					m.event(Event{Type: "progress", ID: t.id, Name: t.name, Bytes: ackedOffset, Total: t.total})
-				} else if sig.Type == "result" && sig.Error != "" {
-					m.finish(t, errors.New(sig.Error))
+				if !handle(sig) {
 					return
 				}
 			case <-time.After(5 * time.Millisecond):
@@ -477,42 +857,28 @@ func (m *Manager) sendFile(t *task) {
 		}
 		sentOffset += int64(n)
 
-		// Drain available ACKs non-blockingly
+		// Drain available ACKs non-blockingly.
+	drain:
 		for {
 			select {
 			case sig := <-t.signals:
-				if sig.Type == "ack" && sig.Offset > ackedOffset {
-					ackedOffset = sig.Offset
-					t.mu.Lock()
-					t.offset = ackedOffset
-					t.mu.Unlock()
-					m.event(Event{Type: "progress", ID: t.id, Name: t.name, Bytes: ackedOffset, Total: t.total})
-				} else if sig.Type == "result" && sig.Error != "" {
-					m.finish(t, errors.New(sig.Error))
+				if !handle(sig) {
 					return
 				}
 			default:
-				goto drained
+				break drain
 			}
 		}
-	drained:
 	}
 
-	// Drain remaining ACKs until all sent bytes are acknowledged
+	// Wait until every sent byte is acknowledged.
 	for ackedOffset < t.total {
 		sig, err := m.signal(t)
 		if err != nil {
 			m.finish(t, err)
 			return
 		}
-		if sig.Type == "ack" && sig.Offset > ackedOffset {
-			ackedOffset = sig.Offset
-			t.mu.Lock()
-			t.offset = ackedOffset
-			t.mu.Unlock()
-			m.event(Event{Type: "progress", ID: t.id, Name: t.name, Bytes: ackedOffset, Total: t.total})
-		} else if sig.Type == "result" && sig.Error != "" {
-			m.finish(t, errors.New(sig.Error))
+		if !handle(sig) {
 			return
 		}
 	}
@@ -521,26 +887,36 @@ func (m *Manager) sendFile(t *task) {
 		m.finish(t, e)
 		return
 	}
-	result, e := m.signal(t)
-	if e != nil {
-		m.finish(t, e)
+	for {
+		result, e := m.signal(t)
+		if e != nil {
+			m.finish(t, e)
+			return
+		}
+		if result.Type == "ack" {
+			continue
+		}
+		if result.Type != "result" || result.Error != "" {
+			m.finish(t, errors.New(result.Error))
+			return
+		}
+		if t.job != nil && result.Name != "" && result.Name != t.name {
+			m.mu.Lock()
+			t.job.Saved = result.Name
+			m.mu.Unlock()
+		}
+		m.finish(t, nil)
 		return
 	}
-	if result.Type != "result" || result.Error != "" {
-		m.finish(t, errors.New(result.Error))
-		return
-	}
-	m.finish(t, nil)
 }
 
+// receiveFile prepares a private temp file inside the target directory so the
+// final commit is a same-filesystem link.
 func (m *Manager) receiveFile(t *task, size int64) error {
 	if size < 0 || size > MaxFileBytes {
 		return errors.New("文件大小无效")
 	}
-	if err := os.MkdirAll(m.root, 0700); err != nil {
-		return err
-	}
-	dir, err := os.MkdirTemp(m.root, ".godeck-upload-")
+	dir, err := os.MkdirTemp(t.dir, tempPrefix)
 	if err != nil {
 		return err
 	}
@@ -566,6 +942,239 @@ func (m *Manager) receiveFile(t *task, size int64) error {
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Host handlers
+
+func (m *Manager) hostList(x wire) {
+	parts, ok := splitPath(x.Path)
+	if !ok {
+		_ = m.send(wire{Type: "list_result", ID: x.ID, Path: x.Path, Error: "目录路径无效"})
+		return
+	}
+	dir, err := resolveDir(m.root, parts, false)
+	if err != nil {
+		_ = m.send(wire{Type: "list_result", ID: x.ID, Path: x.Path, Error: err.Error()})
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		_ = m.send(wire{Type: "list_result", ID: x.ID, Path: x.Path, Error: "无法读取共享目录"})
+		return
+	}
+	files := make([]File, 0)
+	for _, entry := range entries {
+		if len(files) >= maxListEntries {
+			break
+		}
+		if !validName(entry.Name()) {
+			continue
+		}
+		info, e := entry.Info()
+		if e != nil {
+			continue
+		}
+		if isPlainDir(info) {
+			files = append(files, File{Name: entry.Name(), Modified: info.ModTime(), Dir: true})
+		} else if info.Mode().IsRegular() {
+			files = append(files, File{Name: entry.Name(), Size: info.Size(), Modified: info.ModTime()})
+		}
+	}
+	_ = m.send(wire{Type: "list_result", ID: x.ID, Path: x.Path, Files: files})
+}
+
+func (m *Manager) hostTree(x wire) {
+	parts, ok := splitPath(x.Path)
+	if !ok || len(parts) == 0 {
+		_ = m.send(wire{Type: "tree_result", ID: x.ID, Error: "目录路径无效"})
+		return
+	}
+	top, err := resolveDir(m.root, parts, false)
+	if err != nil {
+		_ = m.send(wire{Type: "tree_result", ID: x.ID, Error: err.Error()})
+		return
+	}
+	var files []treeFile
+	var dirs []string
+	count := 0
+	var walk func(abs, rel string, depth int) error
+	walk = func(abs, rel string, depth int) error {
+		if depth > maxPathDepth {
+			return errors.New("文件夹层级过深")
+		}
+		entries, err := os.ReadDir(abs)
+		if err != nil {
+			return errors.New("无法读取文件夹")
+		}
+		dirs = append(dirs, rel)
+		for _, entry := range entries {
+			if !validName(entry.Name()) {
+				continue
+			}
+			count++
+			if count > maxTreeEntries {
+				return errors.New("文件夹内条目超过 10000 个")
+			}
+			info, e := entry.Info()
+			if e != nil {
+				continue
+			}
+			childRel := JoinPath(rel, entry.Name())
+			if isPlainDir(info) {
+				if err := walk(filepath.Join(abs, entry.Name()), childRel, depth+1); err != nil {
+					return err
+				}
+			} else if info.Mode().IsRegular() {
+				files = append(files, treeFile{Path: childRel, Size: info.Size()})
+			}
+		}
+		return nil
+	}
+	if err = walk(top, x.Path, len(parts)); err != nil {
+		_ = m.send(wire{Type: "tree_result", ID: x.ID, Error: err.Error()})
+		return
+	}
+	if files == nil {
+		files = []treeFile{}
+	}
+	_ = m.send(wire{Type: "tree_result", ID: x.ID, Path: x.Path, Tree: files, Dirs: dirs})
+}
+
+func (m *Manager) hostUpload(x wire) {
+	parts, ok := splitPath(wirePath(x))
+	if !ok || len(parts) == 0 {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件名不受支持"})
+		return
+	}
+	t := newTask(x.ID, parts[len(parts)-1], nil)
+	if e := m.start(t); e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		return
+	}
+	dir, e := resolveDir(m.root, parts[:len(parts)-1], true)
+	if e == nil {
+		t.dir = dir
+		e = m.receiveFile(t, x.Size)
+	}
+	if e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		m.finish(t, e)
+		return
+	}
+	_ = m.send(wire{Type: "ready", ID: x.ID})
+	go m.deadline(t)
+}
+
+func (m *Manager) hostMkdir(x wire) {
+	parts, ok := splitPath(x.Path)
+	if !ok || len(parts) == 0 {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "目录名不受支持"})
+		return
+	}
+	if _, e := resolveDir(m.root, parts, true); e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		return
+	}
+	_ = m.send(wire{Type: "result", ID: x.ID, Name: parts[len(parts)-1]})
+}
+
+func (m *Manager) hostDownload(x wire) {
+	parts, ok := splitPath(wirePath(x))
+	if !ok || len(parts) == 0 {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件名无效"})
+		return
+	}
+	dir, e := resolveDir(m.root, parts[:len(parts)-1], false)
+	if e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		return
+	}
+	f, e := openRegular(filepath.Join(dir, parts[len(parts)-1]))
+	if e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件不可用"})
+		return
+	}
+	info, e := f.Stat()
+	if e != nil || info.Size() > MaxFileBytes {
+		f.Close()
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件超过 100 MiB 限制或不可用"})
+		return
+	}
+	t := newTask(x.ID, parts[len(parts)-1], nil)
+	t.total = info.Size()
+	t.file = f
+	t.sender = true
+	if e = m.start(t); e != nil {
+		t.close()
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		return
+	}
+	if e = m.send(wire{Type: "begin", ID: t.id, Name: t.name, Size: t.total}); e != nil {
+		m.finish(t, e)
+		return
+	}
+	go m.sendFile(t)
+}
+
+// viewerTree turns a remote folder listing into download jobs and creates
+// empty local folders right away.
+func (m *Manager) viewerTree(x wire) {
+	m.mu.Lock()
+	req, ok := m.trees[x.ID]
+	delete(m.trees, x.ID)
+	m.mu.Unlock()
+	if !ok || m.role != Viewer {
+		return
+	}
+	if x.Error != "" {
+		m.event(Event{Type: "error", Error: "读取远端文件夹失败：" + x.Error})
+		return
+	}
+	prefix := req.remote + "/"
+	localPath := func(remote string) (string, bool) {
+		if remote == req.remote {
+			return req.local, true
+		}
+		if len(remote) <= len(prefix) || remote[:len(prefix)] != prefix {
+			return "", false
+		}
+		local := JoinPath(req.local, remote[len(prefix):])
+		_, valid := splitPath(local)
+		return local, valid
+	}
+	for _, d := range x.Dirs {
+		if local, ok := localPath(d); ok {
+			if parts, ok := splitPath(local); ok {
+				_, _ = resolveDir(m.root, parts, true)
+			}
+		}
+	}
+	jobs := make([]*Job, 0, len(x.Tree))
+	for _, f := range x.Tree {
+		local, ok := localPath(f.Path)
+		if !ok {
+			continue
+		}
+		if _, ok = splitPath(f.Path); !ok {
+			continue
+		}
+		j := &Job{Kind: JobDownload, Remote: f.Path, Local: local, Size: f.Size}
+		if f.Size > MaxFileBytes {
+			j.State, j.Error = JobFailed, "超过 100 MiB 上限"
+		}
+		jobs = append(jobs, j)
+	}
+	if len(jobs) == 0 {
+		m.event(Event{Type: "error", Error: "远端文件夹为空，已在本机创建目录"})
+		return
+	}
+	if err := m.addJobs(jobs); err != nil {
+		m.event(Event{Type: "error", Error: err.Error()})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Message dispatch
+
 func (m *Manager) message(msg webrtc.DataChannelMessage) {
 	if !m.permitted() {
 		_ = m.Cancel()
@@ -575,7 +1184,7 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 		m.chunk(msg.Data)
 		return
 	}
-	if len(msg.Data) > 256<<10 {
+	if len(msg.Data) > 4<<20 {
 		return
 	}
 	var x wire
@@ -584,102 +1193,50 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 	}
 	switch x.Type {
 	case "list":
-		if m.role != Host {
-			return
+		if m.role == Host {
+			m.hostList(x)
 		}
-		entries, e := os.ReadDir(m.root)
-		if e != nil {
-			_ = m.send(wire{Type: "list_result", ID: x.ID, Error: "无法读取共享目录"})
-			return
+
+	case "tree":
+		if m.role == Host {
+			m.hostTree(x)
 		}
-		files := make([]File, 0)
-		for _, entry := range entries {
-			if len(files) >= maxFiles {
-				break
-			}
-			if !validName(entry.Name()) || strings.HasPrefix(entry.Name(), ".godeck-upload-") {
-				continue
-			}
-			info, e := entry.Info()
-			if e == nil && info.Mode().IsRegular() {
-				files = append(files, File{Name: entry.Name(), Size: info.Size(), Modified: info.ModTime()})
-			}
+
+	case "upload":
+		if m.role == Host {
+			m.hostUpload(x)
 		}
-		_ = m.send(wire{Type: "list_result", ID: x.ID, Files: files})
+
+	case "mkdir":
+		if m.role == Host {
+			m.hostMkdir(x)
+		}
+
+	case "download":
+		if m.role == Host {
+			m.hostDownload(x)
+		}
 
 	case "list_result":
 		m.mu.Lock()
 		ok := m.role == Viewer && m.pendingList == x.ID
+		path := m.listPath
 		if ok {
 			m.pendingList = ""
 		}
 		m.mu.Unlock()
 		if ok {
-			m.event(Event{Type: "list", Files: x.Files, Error: x.Error})
+			m.event(Event{Type: "list", Path: path, Files: x.Files, Error: x.Error})
 		}
 
-	case "upload":
-		if m.role != Host || !validName(x.Name) {
-			return
-		}
-		t := &task{
-			id:      x.ID,
-			name:    x.Name,
-			signals: make(chan wire, 64),
-			stop:    make(chan struct{}),
-		}
-		if e := m.start(t); e != nil {
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
-			return
-		}
-		if e := m.receiveFile(t, x.Size); e != nil {
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
-			m.finish(t, e)
-			return
-		}
-		_ = m.send(wire{Type: "ready", ID: x.ID})
-		go m.deadline(t)
-
-	case "download":
-		if m.role != Host || !validName(x.Name) {
-			return
-		}
-		f, e := openRegular(filepath.Join(m.root, x.Name))
-		if e != nil {
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件不可用"})
-			return
-		}
-		info, e := f.Stat()
-		if e != nil || info.Size() > MaxFileBytes {
-			f.Close()
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件超过限制或不可用"})
-			return
-		}
-		t := &task{
-			id:      x.ID,
-			name:    x.Name,
-			total:   info.Size(),
-			file:    f,
-			sender:  true,
-			signals: make(chan wire, 64),
-			stop:    make(chan struct{}),
-		}
-		if e = m.start(t); e != nil {
-			t.close()
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
-			return
-		}
-		if e = m.send(wire{Type: "begin", ID: t.id, Name: t.name, Size: t.total}); e != nil {
-			m.finish(t, e)
-			return
-		}
-		go m.sendFile(t)
+	case "tree_result":
+		m.viewerTree(x)
 
 	case "begin":
 		m.mu.Lock()
 		t := m.current
 		m.mu.Unlock()
-		if m.role != Viewer || t == nil || t.id != x.ID || t.sender || t.name != x.Name {
+		if m.role != Viewer || t == nil || t.id != x.ID || t.sender || t.job == nil || t.job.Kind != JobDownload {
 			return
 		}
 		if e := m.receiveFile(t, x.Size); e != nil {
@@ -687,6 +1244,9 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 			m.finish(t, e)
 			return
 		}
+		m.mu.Lock()
+		t.job.Size = x.Size
+		m.mu.Unlock()
 		_ = m.send(wire{Type: "ready", ID: x.ID})
 
 	case "ready", "ack", "result":
@@ -697,13 +1257,13 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 			return
 		}
 		if !t.sender && x.Type == "result" {
-			m.finish(t, errors.New(x.Error))
+			// mkdir success, or a download/upload refused by the peer.
+			m.finish(t, errOf(x.Error))
 			return
 		}
 		select {
 		case t.signals <- x:
 		default:
-			// Bounded signals queue overflow
 			m.finish(t, errors.New("传输确认队列溢出"))
 		}
 
@@ -714,45 +1274,7 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 		if t == nil || t.id != x.ID || t.sender {
 			return
 		}
-		t.mu.Lock()
-		if t.file == nil || t.offset != t.total || x.Offset != t.total {
-			t.mu.Unlock()
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件长度不符"})
-			m.finish(t, errors.New("文件长度不符"))
-			return
-		}
-		e := t.file.Sync()
-		if e == nil {
-			e = t.file.Close()
-		}
-		t.file = nil
-		if e == nil && m.permitted() {
-			src := filepath.Join(t.temp, "data")
-			dst := filepath.Join(m.root, t.name)
-			if e = os.Link(src, dst); e != nil {
-				if _, statErr := os.Lstat(dst); statErr == nil {
-					e = errors.New("无法保存：同名文件已存在")
-				} else if os.IsNotExist(statErr) {
-					if renErr := os.Rename(src, dst); renErr == nil {
-						e = nil
-					} else {
-						e = errors.New("无法保存文件：" + renErr.Error())
-					}
-				} else {
-					e = errors.New("无法保存文件：" + e.Error())
-				}
-			}
-		} else if e == nil {
-			e = errors.New("文件权限已撤回")
-		}
-		t.mu.Unlock()
-		if e != nil {
-			_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
-			m.finish(t, e)
-			return
-		}
-		_ = m.send(wire{Type: "result", ID: x.ID})
-		m.finish(t, nil)
+		m.commit(t, x)
 
 	case "cancel":
 		m.mu.Lock()
@@ -762,6 +1284,40 @@ func (m *Manager) message(msg webrtc.DataChannelMessage) {
 			m.finish(t, errors.New("对方取消了传输"))
 		}
 	}
+}
+
+func (m *Manager) commit(t *task, x wire) {
+	t.mu.Lock()
+	if t.file == nil || t.offset != t.total || x.Offset != t.total {
+		t.mu.Unlock()
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: "文件长度不符"})
+		m.finish(t, errors.New("文件长度不符"))
+		return
+	}
+	e := t.file.Sync()
+	if cerr := t.file.Close(); e == nil {
+		e = cerr
+	}
+	t.file = nil
+	saved := ""
+	if e == nil && m.permitted() {
+		saved, e = commitUnique(filepath.Join(t.temp, "data"), t.dir, t.name)
+	} else if e == nil {
+		e = errors.New("文件权限已撤回")
+	}
+	t.mu.Unlock()
+	if e != nil {
+		_ = m.send(wire{Type: "result", ID: x.ID, Error: e.Error()})
+		m.finish(t, e)
+		return
+	}
+	if t.job != nil && saved != t.name {
+		m.mu.Lock()
+		t.job.Saved = saved
+		m.mu.Unlock()
+	}
+	_ = m.send(wire{Type: "result", ID: x.ID, Name: saved})
+	m.finish(t, nil)
 }
 
 func (m *Manager) chunk(data []byte) {
@@ -791,10 +1347,24 @@ func (m *Manager) chunk(data []byte) {
 		return
 	}
 	t.offset += int64(n)
-	now, total := t.offset, t.total
+	now := t.offset
 	t.mu.Unlock()
 	t.last.Store(time.Now().UnixNano())
 
 	_ = m.send(wire{Type: "ack", ID: id, Offset: now})
-	m.event(Event{Type: "progress", ID: id, Name: t.name, Bytes: now, Total: total})
+	m.progress(t, now)
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }

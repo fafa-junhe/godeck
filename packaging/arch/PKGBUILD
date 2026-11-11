@@ -35,6 +35,8 @@ optdepends=(
   'libva-intel-driver: VA-API hardware driver for Intel Haswell-ULT (i965)'
   'libva-utils: vainfo diagnostic utility for VA-API hardware acceleration'
   'fcitx5: Chinese/multilingual Wayland input method framework (via native zwp_text_input_v3)'
+  'wl-clipboard: clipboard sync on Wayland (wl-paste/wl-copy)'
+  'xclip: clipboard sync on X11'
   'kdialog: file picker dialog fallback on KDE Plasma'
   'zenity: file picker dialog fallback on GTK desktops'
   'hicolor-icon-theme: FreeDesktop standard icon theme directory hierarchy'
