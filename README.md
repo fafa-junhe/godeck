@@ -152,3 +152,11 @@ go build -o godeck-hub ./cmd/godeck-hub
 - 端到端完全零拷贝回读。
 - 多组织与多用户团队权限。
 - 发布版安装包（如 Windows 安装版 exe 或 Linux deb/rpm 包）。
+
+---
+
+## 7. 许可证
+
+本项目（除 `third_party/` 外）以 [PolyForm Noncommercial License 1.0.0](LICENSE) 授权：允许个人学习、研究、爱好及非营利组织等非商业用途的使用、修改与再分发，**禁止任何商业用途**。如需商业授权请联系作者。
+
+`third_party/` 下的第三方代码（如 Gio）保留其各自原有许可证，见对应目录内的 LICENSE 文件。
