@@ -139,6 +139,7 @@ func StartHostWithTransport(parent context.Context, offer string, control bool, 
 		return nil, "", err
 	}
 	peer.SetFileHandler(files, opts.FileHandler)
+	peer.SetClipboardHandler(opts.ClipboardHandler)
 
 	// Dimensions reported in metadata come from actual encoder output if available, otherwise target dimensions.
 	actualW, actualH := targetWidth, targetHeight
@@ -651,6 +652,13 @@ func (v *Viewer) OpenFiles() (*webrtc.DataChannel, error) {
 		return nil, errors.New("会话未连接")
 	}
 	return v.Peer.OpenFiles()
+}
+
+func (v *Viewer) OpenClipboard() (*webrtc.DataChannel, error) {
+	if v.Peer == nil {
+		return nil, errors.New("会话未连接")
+	}
+	return v.Peer.OpenClipboard()
 }
 
 func (v *Viewer) Close() {

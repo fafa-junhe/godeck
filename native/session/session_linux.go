@@ -203,6 +203,7 @@ func StartHostWithTransport(parent context.Context, offer string, control bool, 
 		return nil, "", err
 	}
 	peer.SetFileHandler(files, opts.FileHandler)
+	peer.SetClipboardHandler(opts.ClipboardHandler)
 
 	actualW, actualH := targetWidth, targetHeight
 	if first.Width > 0 && first.Height > 0 {
@@ -910,6 +911,13 @@ func (v *Viewer) OpenFiles() (*webrtc.DataChannel, error) {
 		return nil, errors.New("会话未连接")
 	}
 	return v.Peer.OpenFiles()
+}
+
+func (v *Viewer) OpenClipboard() (*webrtc.DataChannel, error) {
+	if v.Peer == nil {
+		return nil, errors.New("会话未连接")
+	}
+	return v.Peer.OpenClipboard()
 }
 
 func (v *Viewer) Close() {

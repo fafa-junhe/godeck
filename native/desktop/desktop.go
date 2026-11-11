@@ -20,6 +20,7 @@ import (
 
 	"godeck/internal/config"
 	"godeck/native/client"
+	"godeck/native/clipboard"
 	"godeck/native/media"
 	"godeck/native/rtc"
 	"godeck/native/signaling"
@@ -169,6 +170,11 @@ func Run() error {
 		m.recordRenderFrame()
 		m.status = "画面就绪"
 		m.mu.Unlock()
+		w.Invalidate()
+	}
+
+	controller.OnClipboardEvent = func(role client.ClipboardRole, e clipboard.Event) {
+		m.handleClipboardEvent(role, e)
 		w.Invalidate()
 	}
 

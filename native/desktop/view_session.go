@@ -52,6 +52,13 @@ func (u *UI) layoutSessionView(gtx layout.Context) layout.Dimensions {
 		_ = u.pump.Send(rtc.Input{Type: "key", Code: 1, Down: false})
 	}
 
+	// Event handling: Clipboard sync pause/resume
+	if u.btnToggleClipboard.Clicked(gtx) {
+		if s := c.ViewerClipboard(); s != nil {
+			s.SetEnabled(!s.Enabled())
+		}
+	}
+
 	// Event handling: Disconnect
 	if u.btnEndSession.Clicked(gtx) {
 		u.stopInput()
@@ -78,6 +85,8 @@ func (u *UI) layoutSessionView(gtx layout.Context) layout.Dimensions {
 	showStats := u.m.showStats
 	statusText := u.m.status
 	sessionActive := u.m.sessionActive
+	clipState := u.m.clipState
+	clipNote := u.m.clipNote
 	u.m.mu.Unlock()
 
 	if u.operating && (!sessionActive || !c.RemoteControlAllowed()) {
@@ -127,6 +136,11 @@ func (u *UI) layoutSessionView(gtx layout.Context) layout.Dimensions {
 							return PrimaryButton(u.theme, &u.btnToggleStats, "监控中 (开启)")(gtx)
 						}
 						return GhostButton(u.theme, &u.btnToggleStats, "实时统计 (F2)")(gtx)
+					}),
+
+					layout.Rigid(HGap(8)),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.layoutClipboardToggle(gtx, clipState, clipNote)
 					}),
 
 					layout.Flexed(1, layout.Spacer{}.Layout),

@@ -34,7 +34,7 @@ func (u *UI) layoutApprovalCard(gtx layout.Context) layout.Dimensions {
 		u.m.incoming = nil
 		u.m.mu.Unlock()
 		if r != nil {
-			u.m.controller.Decide(r.ID, true, false, u.approveFiles.Value)
+			u.m.controller.Decide(r.ID, true, false, u.approveFiles.Value, u.approveClipboard.Value)
 		}
 	}
 	if u.approveControl.Clicked(gtx) {
@@ -43,7 +43,7 @@ func (u *UI) layoutApprovalCard(gtx layout.Context) layout.Dimensions {
 		u.m.incoming = nil
 		u.m.mu.Unlock()
 		if r != nil {
-			u.m.controller.Decide(r.ID, true, true, u.approveFiles.Value)
+			u.m.controller.Decide(r.ID, true, true, u.approveFiles.Value, u.approveClipboard.Value)
 		}
 	}
 	if u.rejectIncoming.Clicked(gtx) {
@@ -52,7 +52,7 @@ func (u *UI) layoutApprovalCard(gtx layout.Context) layout.Dimensions {
 		u.m.incoming = nil
 		u.m.mu.Unlock()
 		if r != nil {
-			u.m.controller.Decide(r.ID, false, false, false)
+			u.m.controller.Decide(r.ID, false, false, false, false)
 		}
 	}
 
@@ -82,6 +82,8 @@ func (u *UI) layoutApprovalCard(gtx layout.Context) layout.Dimensions {
 							}
 							return material.CheckBox(u.theme, &u.approveFiles, label).Layout(gtx)
 						}),
+						layout.Rigid(HGap(12)),
+						layout.Rigid(material.CheckBox(u.theme, &u.approveClipboard, "允许双向剪贴板同步（文本）").Layout),
 						layout.Flexed(1, layout.Spacer{}.Layout),
 						layout.Rigid(PrimaryButton(u.theme, &u.approveControl, "允许控制与查看")),
 						layout.Rigid(HGap(10)),

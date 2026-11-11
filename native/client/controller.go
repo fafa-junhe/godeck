@@ -13,6 +13,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"golang.org/x/net/websocket"
+	"godeck/native/clipboard"
 	"godeck/native/media"
 	"godeck/native/rtc"
 	"godeck/native/session"
@@ -56,12 +57,16 @@ type Controller struct {
 	hubPending       *hubApproval
 	fileMgr          *transfer.Manager
 	fileMu           sync.Mutex
+	clipHost         *clipboard.Sync
+	clipViewer       *clipboard.Sync
+	clipMu           sync.Mutex
 	OnRequest        func(signaling.Request)
 	OnStatus         func(string)
 	OnDecoder        func(media.Codec, string)
 	OnEncoder        func(string, string)
 	OnFrame          func(media.Sample)
 	OnFileEvent      func(transfer.Event)
+	OnClipboardEvent func(ClipboardRole, clipboard.Event)
 }
 
 func New(dir string, codec media.Codec) (*Controller, error) {
@@ -185,8 +190,8 @@ func (c *Controller) IncomingActive() bool {
 	return c.incoming != nil
 }
 
-func (c *Controller) Decide(requestID string, allow bool, control bool, files bool) error {
-	d := signaling.Decision{Accept: allow, Control: control, Files: files}
+func (c *Controller) Decide(requestID string, allow bool, control bool, files bool, clipboard bool) error {
+	d := signaling.Decision{Accept: allow, Control: control, Files: files, Clipboard: clipboard}
 	c.mu.Lock()
 	p := c.hubPending
 	c.mu.Unlock()
@@ -294,8 +299,10 @@ func (c *Controller) presetChoice() media.Preset {
 	return c.preset
 }
 
-func (c *Controller) acceptOffer(ctx context.Context, offer signaling.Offer, control bool, files bool) (signaling.Answer, error) {
+func (c *Controller) acceptOffer(ctx context.Context, offer signaling.Offer, d signaling.Decision) (signaling.Answer, error) {
+	control, files := d.Control, d.Files
 	sessionCtx, cancel := context.WithCancel(ctx)
+	clipHandler := c.hostClipboardHandler(d.Clipboard)
 	filesAllowed := files && c.AllowFilesHost()
 	var fileHandler func(*webrtc.DataChannel)
 
@@ -342,7 +349,8 @@ func (c *Controller) acceptOffer(ctx context.Context, offer signaling.Offer, con
 	}
 
 	h, answer, err := session.StartHostWithTransport(sessionCtx, offer.SDP, control, filesAllowed, c.codecChoice(), c.presetChoice(), session.HostOptions{
-		FileHandler:     fileHandler,
+		FileHandler:      fileHandler,
+		ClipboardHandler: clipHandler,
 		Transport:       mode,
 		TransportReason: offer.TransportReason,
 		WSTunnel:        wsTun,
@@ -381,6 +389,7 @@ func (c *Controller) acceptOffer(ctx context.Context, offer signaling.Offer, con
 			c.fileMgr = nil
 		}
 		c.fileMu.Unlock()
+		c.closeHostClipboard()
 		c.mu.Lock()
 		if c.incoming == h {
 			c.incoming = nil
@@ -605,6 +614,8 @@ func (c *Controller) Connect(ctx context.Context, address, pin, key, name string
 
 	committed = true
 
+	c.openViewerClipboard(v)
+
 	if answer.FilesAllowed {
 		if dc, e := v.OpenFiles(); e == nil {
 			c.fileMu.Lock()
@@ -678,6 +689,7 @@ func (c *Controller) endOutgoing(v *session.Viewer) {
 		c.fileMgr = nil
 	}
 	c.fileMu.Unlock()
+	c.closeViewerClipboard()
 
 	if cancel != nil {
 		cancel()

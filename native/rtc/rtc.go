@@ -49,6 +49,7 @@ type Peer struct {
 	allowInput      bool
 	allowFiles      bool
 	fileHandler     func(*webrtc.DataChannel)
+	clipHandler     func(*webrtc.DataChannel)
 	negotiatedLevel int
 	lastTelemetry   HostTelemetry
 	lastPLI         time.Time
@@ -255,6 +256,17 @@ func (p *Peer) attach(dc *webrtc.DataChannel) {
 		allowed, handler := p.allowFiles, p.fileHandler
 		p.mu.RUnlock()
 		if !allowed || handler == nil {
+			dc.Close()
+			return
+		}
+		handler(dc)
+		return
+	}
+	if dc.Label() == ClipboardLabel {
+		p.mu.RLock()
+		handler := p.clipHandler
+		p.mu.RUnlock()
+		if handler == nil {
 			dc.Close()
 			return
 		}
@@ -658,6 +670,24 @@ func (p *Peer) SetFileHandler(allowed bool, handler func(*webrtc.DataChannel)) {
 	p.allowFiles = allowed
 	p.fileHandler = handler
 	p.mu.Unlock()
+}
+
+// ClipboardLabel names the reliable, ordered clipboard text channel.
+const ClipboardLabel = "godeck-clipboard"
+
+// SetClipboardHandler authorizes the clipboard channel for this session. A nil
+// handler (the default) means the host closes any clipboard channel the viewer opens.
+func (p *Peer) SetClipboardHandler(handler func(*webrtc.DataChannel)) {
+	p.mu.Lock()
+	p.clipHandler = handler
+	p.mu.Unlock()
+}
+
+// OpenClipboard opens the clipboard channel from the viewer side. The host
+// accepts it only when its user approved clipboard sync for this session.
+func (p *Peer) OpenClipboard() (*webrtc.DataChannel, error) {
+	ordered := true
+	return p.pc.CreateDataChannel(ClipboardLabel, &webrtc.DataChannelInit{Ordered: &ordered})
 }
 
 // OpenFiles opens the ordered reliable channel after the host grants permission.

@@ -218,9 +218,10 @@ type Request struct {
 }
 
 type Decision struct {
-	Accept  bool
-	Control bool
-	Files   bool
+	Accept    bool
+	Control   bool
+	Files     bool
+	Clipboard bool
 }
 
 type pending struct {
@@ -244,7 +245,7 @@ type Host struct {
 	OnReserve   func() bool
 	OnRelease   func()
 	OnRequest   func(Request)
-	OnOffer     func(context.Context, Offer, bool, bool) (Answer, error)
+	OnOffer     func(context.Context, Offer, Decision) (Answer, error)
 	OnWSConnect func(requestID string, ws *websocket.Conn) <-chan struct{}
 }
 
@@ -453,7 +454,7 @@ func (h *Host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "媒体服务不可用", 503)
 		return
 	}
-	answer, err := h.OnOffer(ctx, offer, decision.Control, decision.Files)
+	answer, err := h.OnOffer(ctx, offer, decision)
 	if err != nil {
 		http.Error(w, "无法建立媒体会话："+err.Error(), 503)
 		return

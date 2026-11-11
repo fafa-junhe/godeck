@@ -65,6 +65,10 @@ type Model struct {
 	transferTotal int64
 	transferProg  string
 	transferErr   string
+
+	// Clipboard sync state of the outgoing session
+	clipState string // "", "pending", "active", "denied"
+	clipNote  string
 }
 
 type UI struct {
@@ -85,6 +89,7 @@ type UI struct {
 	approveView    widget.Clickable
 	approveControl widget.Clickable
 	approveFiles   widget.Bool
+	approveClipboard widget.Bool
 	rejectIncoming widget.Clickable
 
 	// Home View widgets
@@ -133,6 +138,7 @@ type UI struct {
 	btnToggleStats     widget.Clickable
 	btnCloseStats      widget.Clickable
 	btnRemoteEsc       widget.Clickable
+	btnToggleClipboard widget.Clickable
 	btnEndSession      widget.Clickable
 	operating          bool
 	surface            struct{}

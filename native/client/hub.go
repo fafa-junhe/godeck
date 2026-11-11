@@ -289,6 +289,8 @@ accepted:
 		c.OnEncoder(lease.Media.Encoder, "")
 	}
 
+	c.openViewerClipboard(v)
+
 	if lease.FilesAllowed {
 		if dc, e := v.OpenFiles(); e == nil {
 			c.fileMu.Lock()
@@ -345,7 +347,7 @@ accepted:
 }
 
 // StartHubHost is called only after this device's user explicitly approves.
-func (c *Controller) StartHubHost(parent context.Context, h *hubclient.Client, request hubclient.Session, control bool, files bool) error {
+func (c *Controller) StartHubHost(parent context.Context, h *hubclient.Client, request hubclient.Session, control bool, files bool, clipboard bool) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	defer c.ReleaseIncoming()
@@ -379,8 +381,9 @@ func (c *Controller) StartHubHost(parent context.Context, h *hubclient.Client, r
 	}
 
 	host, answer, err := session.StartHostWithTransport(ctx, request.Offer, control, filesAllowed, c.codecChoice(), c.presetChoice(), session.HostOptions{
-		ICEServers:      hubICE(request.ICEServers),
-		FileHandler:     fileHandler,
+		ICEServers:       hubICE(request.ICEServers),
+		FileHandler:      fileHandler,
+		ClipboardHandler: c.hostClipboardHandler(clipboard),
 		Transport:       mode,
 		TransportReason: request.TransportReason,
 		WSTunnel:        wsTun,
@@ -410,6 +413,7 @@ func (c *Controller) StartHubHost(parent context.Context, h *hubclient.Client, r
 			c.fileMgr = nil
 		}
 		c.fileMu.Unlock()
+		c.closeHostClipboard()
 		c.mu.Lock()
 		if c.incoming == host {
 			c.incoming = nil
@@ -798,7 +802,7 @@ func (c *Controller) hubReceive(ctx context.Context, h *hubState, inv hubclient.
 		return
 	}
 
-	if e := c.StartHubHost(ctx, h.client, inv, d.Control, d.Files); e != nil {
+	if e := c.StartHubHost(ctx, h.client, inv, d.Control, d.Files, d.Clipboard); e != nil {
 		_ = h.client.AnswerSession(ctx, inv.ID, inv.Nonce, "", false, false, false, hubclient.MediaInfo{})
 	}
 }
