@@ -1,0 +1,17 @@
+{
+  "hub_url": "https://godeck.junher.top:8443",
+  "hub_user": "admin",
+  "hub_password": "your-password",
+  "auto_login": true,
+  "auto_pair": true,
+  "device_name": "My-Linux-Desktop",
+  "listen_addr": "0.0.0.0:8766",
+  "accept_incoming": true,
+  "allow_files_host": false,
+  "share_dir": "",
+  "preset": "720p30",
+  "codec": "auto",
+  "transport": "auto",
+  "show_stats": false,
+  "last_target_addr": ""
+}

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1f2327"/>
+      <stop offset="100%" stop-color="#141619"/>
+    </linearGradient>
+    <linearGradient id="limeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c3e99b"/>
+      <stop offset="100%" stop-color="#8fd460"/>
+    </linearGradient>
+    <linearGradient id="screenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#282d32"/>
+      <stop offset="100%" stop-color="#1a1c1f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base Rounded Container -->
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bgGrad)" stroke="#343a42" stroke-width="2.5"/>
+
+  <!-- Outer Monitor Frame -->
+  <rect x="22" y="24" width="84" height="58" rx="8" fill="url(#screenGrad)" stroke="#525c68" stroke-width="2"/>
+
+  <!-- Screen Content Area -->
+  <rect x="27" y="29" width="74" height="48" rx="4" fill="#141619"/>
+
+  <!-- Display Stand -->
+  <path d="M54 82 L74 82 L78 96 L50 96 Z" fill="#282d32" stroke="#525c68" stroke-width="1.5"/>
+  <rect x="42" y="96" width="44" height="4" rx="2" fill="#525c68"/>
+
+  <!-- Remote Signal / Screen Rays in Lime -->
+  <!-- Top decorative bar on inner screen -->
+  <rect x="33" y="35" width="22" height="4" rx="2" fill="url(#limeGrad)"/>
+  <circle cx="61" cy="37" r="2" fill="#55d79b"/>
+  <circle cx="67" cy="37" r="2" fill="#f5be4b"/>
+
+  <!-- Central Remote Connection Wave / Desktop Grid -->
+  <path d="M40 58 L52 46 L66 60 L78 48 L88 58" fill="none" stroke="url(#limeGrad)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="52" cy="46" r="3.5" fill="#c3e99b"/>
+  <circle cx="78" cy="48" r="3.5" fill="#c3e99b"/>
+
+  <!-- Accent Status Dot (Bottom Right of Monitor) -->
+  <circle cx="98" cy="74" r="2.5" fill="#55d79b"/>
+</svg>

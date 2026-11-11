@@ -1,0 +1,45 @@
+#!/sbin/openrc-run
+# ==============================================================================
+# OpenRC Service Script for GoDeck Coturn TURN/STUN Server
+# Target OS: Artix Linux x86_64
+# ==============================================================================
+
+name="godeck-turn"
+description="GoDeck Coturn TURN/STUN Service"
+
+: ${GODECK_TURN_USER:="turnserver"}
+: ${GODECK_TURN_GROUP:="turnserver"}
+: ${GODECK_TURN_BIN:="/usr/bin/turnserver"}
+: ${GODECK_TURN_CONF:="/etc/godeck-turn/turnserver.conf"}
+: ${GODECK_TURN_RUN_DIR:="/run/godeck-turn"}
+: ${GODECK_TURN_LOG_DIR:="/var/log/godeck-turn"}
+
+command="${GODECK_TURN_BIN}"
+# 前台运行，由 supervise-daemon 管理，严禁添加 --daemon
+command_args="-c ${GODECK_TURN_CONF}"
+command_user="${GODECK_TURN_USER}:${GODECK_TURN_GROUP}"
+pidfile="${GODECK_TURN_RUN_DIR}/${RC_SVCNAME}.pid"
+
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=5
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    if [ ! -x "${GODECK_TURN_BIN}" ]; then
+        eerror "turnserver binary not found at ${GODECK_TURN_BIN}"
+        return 1
+    fi
+    if [ ! -f "${GODECK_TURN_CONF}" ]; then
+        eerror "turnserver configuration not found at ${GODECK_TURN_CONF}"
+        return 1
+    fi
+
+    # 状态与运行目录严格隔离
+    checkpath -d -m 0750 -o "${GODECK_TURN_USER}:${GODECK_TURN_GROUP}" "${GODECK_TURN_RUN_DIR}"
+    checkpath -d -m 0750 -o "${GODECK_TURN_USER}:${GODECK_TURN_GROUP}" "${GODECK_TURN_LOG_DIR}"
+}

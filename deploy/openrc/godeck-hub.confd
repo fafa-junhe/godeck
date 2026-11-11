@@ -1,0 +1,27 @@
+# ==============================================================================
+# /etc/conf.d/godeck-hub
+# Configuration for GoDeck Hub service (OpenRC / Artix Linux)
+# ==============================================================================
+
+# 专属运行用户与用户组
+GODECK_HUB_USER="godeck"
+GODECK_HUB_GROUP="godeck"
+
+# 可执行文件与专属数据/运行目录
+GODECK_HUB_BIN="/usr/local/bin/godeck-hub"
+GODECK_HUB_DATA_DIR="/var/lib/godeck-hub"
+GODECK_HUB_RUN_DIR="/run/godeck-hub"
+GODECK_HUB_LOG_DIR="/var/log/godeck-hub"
+
+# 仅监听本地回环地址，由前置 Nginx 负责 HTTPS (8443) 反向代理
+GODECK_HUB_LISTEN="127.0.0.1:8787"
+
+# 共享 TURN 密钥文件（0600 权限，内容与 coturn 严格一致，禁止加入版本库）
+GODECK_HUB_TURN_SECRET_FILE="/etc/godeck-hub/turn-secret.key"
+
+# STUN 与 TURN 服务地址（直连服务器公网 IP YOUR_SERVER_IP，严禁走 Cloudflare 代理）
+GODECK_HUB_STUN="stun:YOUR_SERVER_IP:3478"
+GODECK_HUB_TURN="turn:YOUR_SERVER_IP:3478?transport=udp,turn:YOUR_SERVER_IP:3478?transport=tcp"
+
+# 额外参数（可选）
+GODECK_HUB_EXTRA_ARGS=""

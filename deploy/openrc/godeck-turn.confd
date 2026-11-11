@@ -1,0 +1,11 @@
+# ==============================================================================
+# /etc/conf.d/godeck-turn
+# Configuration for GoDeck Coturn TURN service (OpenRC)
+# ==============================================================================
+
+GODECK_TURN_USER="turnserver"
+GODECK_TURN_GROUP="turnserver"
+GODECK_TURN_BIN="/usr/bin/turnserver"
+GODECK_TURN_CONF="/etc/godeck-turn/turnserver.conf"
+GODECK_TURN_RUN_DIR="/run/godeck-turn"
+GODECK_TURN_LOG_DIR="/var/log/godeck-turn"

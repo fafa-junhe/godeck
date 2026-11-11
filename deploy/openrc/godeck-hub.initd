@@ -1,0 +1,71 @@
+#!/sbin/openrc-run
+# ==============================================================================
+# OpenRC Service Script for GoDeck Hub (Artix Linux x86_64)
+# ==============================================================================
+
+name="godeck-hub"
+description="GoDeck Signaling Hub Service"
+
+: ${GODECK_HUB_USER:="godeck"}
+: ${GODECK_HUB_GROUP:="godeck"}
+: ${GODECK_HUB_BIN:="/usr/local/bin/godeck-hub"}
+: ${GODECK_HUB_DATA_DIR:="/var/lib/godeck-hub"}
+: ${GODECK_HUB_RUN_DIR:="/run/godeck-hub"}
+: ${GODECK_HUB_LOG_DIR:="/var/log/godeck-hub"}
+: ${GODECK_HUB_LISTEN:="127.0.0.1:8787"}
+: ${GODECK_HUB_TURN_SECRET_FILE:="/etc/godeck-hub/turn-secret.key"}
+: ${GODECK_HUB_STUN:="stun:YOUR_SERVER_IP:3478"}
+: ${GODECK_HUB_TURN:="turn:YOUR_SERVER_IP:3478?transport=udp,turn:YOUR_SERVER_IP:3478?transport=tcp"}
+
+command="${GODECK_HUB_BIN}"
+command_user="${GODECK_HUB_USER}:${GODECK_HUB_GROUP}"
+pidfile="${GODECK_HUB_RUN_DIR}/${RC_SVCNAME}.pid"
+output_log="${GODECK_HUB_LOG_DIR}/${RC_SVCNAME}.log"
+error_log="${GODECK_HUB_LOG_DIR}/${RC_SVCNAME}.err"
+
+command_args="-listen ${GODECK_HUB_LISTEN} -data ${GODECK_HUB_DATA_DIR} -setup-code-file ${GODECK_HUB_RUN_DIR}/setup-code"
+
+if [ -n "${GODECK_HUB_TURN_SECRET_FILE}" ] && [ -f "${GODECK_HUB_TURN_SECRET_FILE}" ]; then
+    command_args="${command_args} -turn-secret-file ${GODECK_HUB_TURN_SECRET_FILE}"
+fi
+
+if [ -n "${GODECK_HUB_STUN}" ]; then
+    command_args="${command_args} -stun ${GODECK_HUB_STUN}"
+fi
+
+if [ -n "${GODECK_HUB_TURN}" ]; then
+    command_args="${command_args} -turn ${GODECK_HUB_TURN}"
+fi
+
+if [ -n "${GODECK_HUB_EXTRA_ARGS}" ]; then
+    command_args="${command_args} ${GODECK_HUB_EXTRA_ARGS}"
+fi
+
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=5
+
+depend() {
+    need net
+    after firewall
+    use godeck-turn
+}
+
+start_pre() {
+    # 状态目录必须严格为 0700 属主专用
+    checkpath -d -m 0700 -o "${GODECK_HUB_USER}:${GODECK_HUB_GROUP}" "${GODECK_HUB_DATA_DIR}"
+    # 运行与 setup-code 目录必须严格为 0700 属主专用
+    checkpath -d -m 0700 -o "${GODECK_HUB_USER}:${GODECK_HUB_GROUP}" "${GODECK_HUB_RUN_DIR}"
+    # 日志目录
+    checkpath -d -m 0750 -o "${GODECK_HUB_USER}:${GODECK_HUB_GROUP}" "${GODECK_HUB_LOG_DIR}"
+
+    # 检查 TURN secret 文件权限（若存在）
+    if [ -n "${GODECK_HUB_TURN_SECRET_FILE}" ] && [ -f "${GODECK_HUB_TURN_SECRET_FILE}" ]; then
+        checkpath -f -m 0600 -o "${GODECK_HUB_USER}:${GODECK_HUB_GROUP}" "${GODECK_HUB_TURN_SECRET_FILE}"
+    fi
+
+    # 清理旧的 setup-code 临时文件，避免保留过期旧码误导首次初始化
+    if [ -f "${GODECK_HUB_RUN_DIR}/setup-code" ]; then
+        rm -f "${GODECK_HUB_RUN_DIR}/setup-code"
+    fi
+}

@@ -1,0 +1,79 @@
+# Maintainer: GoDeck Project
+pkgname=godeck
+pkgver=0.1.0.r20261107
+pkgrel=13
+pkgdesc="Modern low-latency end-to-end encrypted remote desktop client (native Gio/WebRTC/VA-API)"
+arch=('x86_64')
+url="https://godeck.junher.top:8443"
+license=('custom:unspecified')
+depends=(
+  'glibc'
+  'glib2'
+  'gcc-libs'
+  'mesa'
+  'libglvnd'
+  'wayland'
+  'libxkbcommon'
+  'libx11'
+  'libxcursor'
+  'libxfixes'
+  'gstreamer'
+  'gst-plugins-base-libs'
+  'xdg-desktop-portal'
+  'ffmpeg'
+  'libva'
+  'ca-certificates'
+)
+optdepends=(
+  'xdg-desktop-portal-kde: Desktop portal backend implementation for KDE Plasma Wayland'
+  'pipewire: PipeWire multimedia server for screen casting and audio'
+  'gst-plugin-pipewire: PipeWire audio/video capture element for GStreamer (pipewiresrc)'
+  'gst-plugin-va: modern VA-API H.264 hardware encoder/decoder (vah264enc/vah264dec)'
+  'gst-plugins-bad: VA-API H.264 hardware acceleration fallback (vaapih264enc/vaapih264dec)'
+  'gst-libav: software H.264 decoding fallback (avdec_h264)'
+  'gst-plugins-ugly: software x264 encoding fallback (x264enc)'
+  'libva-intel-driver: VA-API hardware driver for Intel Haswell-ULT (i965)'
+  'libva-utils: vainfo diagnostic utility for VA-API hardware acceleration'
+  'fcitx5: Chinese/multilingual Wayland input method framework (via native zwp_text_input_v3)'
+  'kdialog: file picker dialog fallback on KDE Plasma'
+  'zenity: file picker dialog fallback on GTK desktops'
+  'hicolor-icon-theme: FreeDesktop standard icon theme directory hierarchy'
+)
+makedepends=('go')
+source=(
+  "godeck-$pkgver.tar.gz"
+  "godeck.desktop"
+  "godeck.svg"
+  "README.md"
+)
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+build() {
+  cd "$srcdir/godeck-$pkgver"
+  export CGO_ENABLED=1
+  export GOOS=linux
+  export GOARCH=amd64
+  export GOAMD64=v1
+  export GOMAXPROCS=2
+  export GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+
+  go build \
+    -tags novulkan \
+    -p 2 \
+    -trimpath \
+    -ldflags="-s -w -buildid=" \
+    -o godeck .
+}
+
+package() {
+  cd "$srcdir/godeck-$pkgver"
+  install -Dm755 godeck "$pkgdir/usr/bin/godeck"
+  install -Dm644 "$srcdir/godeck.desktop" "$pkgdir/usr/share/applications/godeck.desktop"
+  install -Dm644 "$srcdir/godeck.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/godeck.svg"
+  install -Dm644 "$srcdir/README.md" "$pkgdir/usr/share/doc/godeck/README.md"
+}

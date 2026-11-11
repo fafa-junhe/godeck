@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=GoDeck
+GenericName=Remote Desktop
+GenericName[zh_CN]=远程桌面客户端
+Comment=Modern low-latency end-to-end encrypted remote desktop client
+Comment[zh_CN]=现代低延迟端到端加密远程桌面与屏幕控制客户端
+Exec=godeck %u
+Icon=godeck
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;vnc;rdp;screen;sharing;webrtc;
+StartupWMClass=godeck

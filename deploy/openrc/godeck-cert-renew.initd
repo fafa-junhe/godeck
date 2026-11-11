@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+# ==============================================================================
+# OpenRC Service Script for GoDeck Dedicated Cert Renewal Daemon
+# Target Server: Artix Linux x86_64
+# ==============================================================================
+
+name="godeck-cert-renew"
+description="GoDeck Dedicated Certificate Renewal Daemon (godeck.junher.top)"
+
+command="/usr/local/bin/godeck-cert-renew.sh"
+command_user="root:root"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+supervisor="supervise-daemon"
+respawn_delay=10
+respawn_max=5
+
+depend() {
+    need net
+    use nginx
+}
